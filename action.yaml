@@ -1,0 +1,297 @@
+name: Build and Deploy to Environment
+description: Reusable workflow to build and deploy services to k8s clusters
+
+permissions:
+  id-token: write
+  contents: write
+  pull-requests: read
+
+env:
+  TAG: ${{ inputs.environment }}-${{ github.run_number }}
+  RUN_NUMBER: ${{ github.run_number }}
+
+on:
+  workflow_call:
+    inputs:
+      environment:
+        description: The environment to deploy to
+        required: true
+        type: string
+        default: dev
+
+      service-name:
+        description: The name of the service to deploy
+        required: true
+        type: string
+
+      registry:
+        description: The ECR registry URL to push images to
+        required: true
+        type: string
+        
+      cf-template:
+        description: The CloudFormation template file path
+        required: false
+        type: string
+        default: aws-resources.yaml
+
+      path-to-k8s-image-tag:
+        description: The path to the kustomization.yaml file containing the image tag
+        required: true
+        type: string
+      
+      branch-override:
+        description: The branch that will be updated (usually main)
+        required: false
+        type: string
+        default: main
+
+      eks-cluster-stack-name:
+        description: The name of the EKS cluster stack for CloudFormation
+        required: true
+        type: string
+
+      aws-account:
+        description: AWS account identifier
+        required: false
+        type: string
+        default: bisnow
+
+      platforms:
+        description: Docker platforms to build for
+        required: false
+        type: string
+        default: linux/arm64
+
+      flux-target-branch:
+        description: The branch that flux watches (usually flux-main)
+        required: false
+        type: string
+        default: flux-main
+
+      exclude-paths:
+        description: Regex pattern for paths to exclude from build change detection
+        required: false
+        type: string
+        default: '^(\.k8s/|k8s/|\.github/)'
+
+jobs:
+  check-for-build-changes:
+    name: Check for Build-Relevant Changes
+    runs-on: ubuntu-latest
+    outputs:
+      build_container: ${{ steps.filter.outputs.build_container }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Check for relevant changes
+        id: filter
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            echo "Manual run: building container"
+            echo "build_container=true" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+          
+          # Build exclude pattern - combine default excludes with CF template
+          EXCLUDE_PATTERN="${{ inputs.exclude-paths }}|${{ inputs.cf-template }}$"
+          
+          CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -vE "$EXCLUDE_PATTERN" || true)
+          if [[ -n "$CHANGED" ]]; then
+            echo "Changes found that require container build:"
+            echo "$CHANGED"
+            echo "build_container=true" >> $GITHUB_OUTPUT
+          else
+            echo "No changes found that require container build"
+            echo "build_container=false" >> $GITHUB_OUTPUT
+          fi
+
+  check-for-k8s-changes:
+    name: Check for K8s Manifest Changes
+    runs-on: ubuntu-latest
+    outputs:
+      k8s_changed: ${{ steps.filter.outputs.k8s_changed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Check for k8s changes
+        id: filter
+        run: |
+          K8S_CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E '^\.?k8s/' || true)
+          if [[ -n "$K8S_CHANGED" ]]; then
+            echo "K8s changes found:"
+            echo "$K8S_CHANGED"
+            echo "k8s_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "No K8s changes found"
+            echo "k8s_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+  build-and-push:
+    name: Build and Push Docker Image to ECR
+    runs-on: ubuntu-latest
+    needs: check-for-build-changes
+    if: needs.check-for-build-changes.outputs.build_container == 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Build and Push Image to ECR (${{ env.TAG }})
+        uses: bisnow/github-actions-build-and-push-image@v2.1
+        with:
+          aws-account: ${{ inputs.aws-account }}
+          platforms: ${{ inputs.platforms }}
+          registry: ${{ inputs.registry }}
+          build-assets: true
+          image-tag: ${{ env.TAG }}
+
+  update-image-tag:
+    name: Update Kustomize Image Tag in Manifest
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: needs.build-and-push.result == 'success'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Update manifest image to ${{ env.TAG }}
+        run: |
+          echo "Updating image tag in ${{ inputs.path-to-k8s-image-tag }}"
+          # Verify the file exists
+          if [[ ! -f "${{ inputs.path-to-k8s-image-tag }}" ]]; then
+            echo "Error: Kustomization file not found at ${{ inputs.path-to-k8s-image-tag }}"
+            exit 1
+          fi
+          
+          # Update the image tag in the manifest 
+          sed -i "s|newTag: .*|newTag: ${{ env.TAG }}|" "${{ inputs.path-to-k8s-image-tag }}"
+          
+          # Verify the change was made
+          if ! grep -q "newTag: ${{ env.TAG }}" "${{ inputs.path-to-k8s-image-tag }}"; then
+            echo "Warning: Image tag may not have been updated correctly"
+            cat "${{ inputs.path-to-k8s-image-tag }}"
+          fi
+      
+      - name: Commit and push manifest update for ${{ env.TAG }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add "${{ inputs.path-to-k8s-image-tag }}"
+          
+          # Check if there are changes to commit
+          if git diff --staged --quiet; then
+            echo "No changes to commit"
+            exit 0
+          fi
+          
+          git commit -m "chore(${{ inputs.service-name }}): update ${{ inputs.environment }} image to ${{ env.TAG }}"
+          git pull --rebase origin ${{ inputs.branch-override }}
+          git push
+
+  check-for-cf-changes:
+    name: Check for CloudFormation/Infra Changes
+    runs-on: ubuntu-latest
+    outputs:
+      cf_changed: ${{ steps.detect.outputs.cf_changed }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Detect CloudFormation template changes
+        id: detect
+        run: |
+          CF_CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -E "^${{ inputs.cf-template }}$" || true)
+          if [[ -n "$CF_CHANGED" ]]; then
+            echo "CloudFormation template changes found:"
+            echo "$CF_CHANGED"
+            echo "cf_changed=true" >> $GITHUB_OUTPUT
+          else
+            echo "No CloudFormation template changes found"
+            echo "cf_changed=false" >> $GITHUB_OUTPUT
+          fi
+
+  deploy-cloudformation:
+    name: Deploy to AWS CloudFormation
+    runs-on: ubuntu-latest
+    needs: check-for-cf-changes
+    if: needs.check-for-cf-changes.outputs.cf_changed == 'true'
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+      
+      - name: Verify CloudFormation template exists
+        run: |
+          if [[ ! -f "${{ inputs.cf-template }}" ]]; then
+            echo "Error: CloudFormation template not found at ${{ inputs.cf-template }}"
+            exit 1
+          fi
+      
+      - name: Log into AWS
+        uses: bisnow/github-actions-assume-role-for-environment@main
+        with:
+          aws-account: ${{ inputs.aws-account }}
+      
+      - name: Deploy to AWS CloudFormation
+        uses: aws-actions/aws-cloudformation-github-deploy@v1
+        with:
+          name: ${{ inputs.service-name }}-${{ inputs.environment }}
+          template: ./${{ inputs.cf-template }}
+          parameter-overrides: "Environment=${{ inputs.environment }},EksClusterStackName=${{ inputs.eks-cluster-stack-name }}"
+          tags: '[{"Key": "cdci","Value":"github"},{"Key": "service","Value":"${{ inputs.service-name }}"},{"Key": "environment","Value":"${{ inputs.environment }}"}]'
+          capabilities: CAPABILITY_NAMED_IAM
+          no-fail-on-empty-changeset: "1"
+
+  update-flux-branch:
+    name: Force-update flux branch to match deployment branch
+    runs-on: ubuntu-latest
+    needs: [deploy-cloudformation, check-for-build-changes, check-for-k8s-changes, update-image-tag]
+    if: always()
+    steps:
+      - name: Decide if we should update flux branch
+        id: should_run
+        run: |
+          echo "build_container=${{ needs.check-for-build-changes.outputs.build_container }}"
+          echo "k8s_changed=${{ needs.check-for-k8s-changes.outputs.k8s_changed }}"
+          echo "update_image_tag_result=${{ needs.update-image-tag.result }}"
+          
+          # Update flux if either:
+          # 1. Container was built and image tag was successfully updated
+          # 2. No container build needed but k8s manifests changed
+          if { 
+            [ "${{ needs.check-for-build-changes.outputs.build_container }}" = "true" ] && [ "${{ needs.update-image-tag.result }}" = "success" ]
+          } || {
+            [ "${{ needs.check-for-build-changes.outputs.build_container }}" = "false" ] && [ "${{ needs.check-for-k8s-changes.outputs.k8s_changed }}" = "true" ]
+          }; then
+            echo "Flux branch update needed"
+            echo "run_flux=true" >> $GITHUB_ENV
+          else
+            echo "No flux branch update needed"
+            echo "run_flux=false" >> $GITHUB_ENV
+          fi
+      
+      - name: Checkout Repository
+        if: env.run_flux == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Ensure local branch is up to date with remote
+        if: env.run_flux == 'true'
+        run: |
+          git fetch origin
+          git checkout ${{ inputs.branch-override }}
+          git reset --hard origin/${{ inputs.branch-override }}
+      
+      - name: Force-update ${{ inputs.flux-target-branch }} to match ${{ inputs.branch-override }}
+        if: env.run_flux == 'true'
+        run: |
+          echo "Force-pushing ${{ inputs.branch-override }} to ${{ inputs.flux-target-branch }}"
+          git push origin ${{ inputs.branch-override }}:${{ inputs.flux-target-branch }} --force
