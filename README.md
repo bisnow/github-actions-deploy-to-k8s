@@ -1,64 +1,53 @@
 # github-actions-deploy-to-k8s
 
-
-# Build and Deploy Reusable Workflow
-
 A reusable GitHub Actions workflow for building Docker images and deploying services to Kubernetes clusters with CloudFormation infrastructure management.
 
 ## Overview
 
 This workflow provides a complete CI/CD pipeline that:
--  Detects changes to determine what needs to be built/deployed
--  Builds and pushes Docker images to ECR
--  Updates Kubernetes manifests with new image tags
--  Deploys CloudFormation infrastructure changes
--  Syncs changes to Flux for GitOps deployment
+- Detects changes to determine what needs to be built/deployed
+- Builds and pushes Docker images to ECR
+- Updates Kubernetes manifests with new image tags
+- Deploys CloudFormation infrastructure changes
+- Syncs changes to Flux for GitOps deployment
 
 ## Usage
 
 ```yaml
-name: Deploy to Environment
-on:
-  push:
-    branches: [main]
-  workflow_dispatch:
 
 jobs:
   deploy:
-    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/build-deploy.yml@main
+    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/action.yaml@main #make sure to reference it correctly
     with:
-      # Required inputs
-      service-name: my-service
-      registry: 560285300220.dkr.ecr.us-east-1.amazonaws.com/bisnow/my-service
-      path-to-k8s-image-tag: .k8s/dev/kustomization.yaml
-      eks-cluster-stack-name: bisnow-non-prod-eks
-      
-      # Optional inputs
       environment: dev
+      service-name: bisreach
+      registry: 000000000000.dkr.ecr.us-east-1.amazonaws.com/bisreach
+      path-to-k8s-image-tag: .k8s/overlays/dev/kustomization.yaml
+      eks-cluster-stack-name: bisnow-non-prod-eks
       cf-template: aws-resources.yaml
-      branch-override: main
+      branch-override: devops/eks-deploy
 ```
 
 ## Required Inputs
 
 | Input | Description | Example |
 |-------|-------------|---------|
-| `service-name` | Name of the service being deployed | `passport`, `user-api`, `payment-service` |
-| `registry` | Full ECR registry URL for the service | `560285300220.dkr.ecr.us-east-1.amazonaws.com/bisnow/my-service` |
-| `path-to-k8s-image-tag` | Path to the kustomization.yaml file containing the image tag | `.k8s/dev/kustomization.yaml` |
-| `eks-cluster-stack-name` | Name of the EKS cluster stack for CloudFormation | `bisnow-non-prod-eks`, `bisnow-prod-eks` |
+| `environment` | The environment to deploy to | `dev`, `beta`, `prod` |
+| `service-name` | The name of the service to deploy | `passport`, `user-api`, `payment-service` |
+| `registry` | The ECR registry URL to push images to | `000000000000.dkr.ecr.us-east-1.amazonaws.com/bisnow/my-service` |
+| `path-to-k8s-image-tag` | The path to the kustomization.yaml file containing the image tag | `.k8s/dev/kustomization.yaml` |
+| `eks-cluster-stack-name` | The name of the EKS cluster stack for CloudFormation | `bisnow-non-prod-eks`, `bisnow-prod-eks` |
 
 ## Optional Inputs
 
 | Input | Description | Default | Example |
 |-------|-------------|---------|---------|
-| `environment` | Target deployment environment | `dev` | `dev`, `beta`, `prod` |
-| `cf-template` | CloudFormation template file path | `aws-resources.yaml` | `infrastructure/template.yaml` |
-| `branch-override` | Branch that will be updated with changes | `main` | `main`, `develop` |
+| `cf-template` | The CloudFormation template file path | `aws-resources.yaml` | `infrastructure/template.yaml` |
+| `branch-override` | The branch that will be updated (usually main) | `main` | `main`, `develop` |
 | `aws-account` | AWS account identifier | `bisnow` | `bisnow`, `production` |
 | `platforms` | Docker platforms to build for | `linux/arm64` | `linux/amd64`, `linux/arm64,linux/amd64` |
-| `flux-target-branch` | Branch that Flux watches for deployments | `flux-main` | `flux-main`, `gitops` |
-| `exclude-paths` | Regex pattern for paths to exclude from build detection | `^(\.k8s/\|k8s/\|\.github/)` | `^(docs/\|\.k8s/)` |
+| `flux-target-branch` | The branch that flux watches (usually flux-main) | `flux-main` | `flux-main`, `gitops` |
+| `exclude-paths` | Regex pattern for paths to exclude from build change detection | `^(\.k8s/\|k8s/\|\.github/)` | `^(docs/\|\.k8s/)` |
 
 ## How It Works
 
@@ -93,72 +82,10 @@ Your repository should have:
 │   └── dev/
 │       └── kustomization.yaml    # Contains newTag field
 ├── aws-resources.yaml            # CloudFormation template
-├── Dockerfile                    # For container builds
-└── .github/
-    └── workflows/
-        └── deploy.yml            # Calls this reusable workflow
-```
+└── Dockerfile                    # For container builds
 
-### Required Permissions
-The calling workflow needs these permissions:
-```yaml
-permissions:
-  id-token: write      # For AWS authentication
-  contents: write      # For updating manifests
-  pull-requests: read  # For change detection
 ```
 
 ### AWS Setup
 - ECR registry must exist and be accessible
 
-## Example Configurations
-
-### Basic Development Deployment
-```yaml
-jobs:
-  deploy-dev:
-    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/build-deploy.yml@main
-    with:
-      service-name: my-service
-      registry: 560285300220.dkr.ecr.us-east-1.amazonaws.com/bisnow/my-service
-      path-to-k8s-image-tag: .k8s/dev/kustomization.yaml
-      eks-cluster-stack-name: bisnow-non-prod-eks
-```
-
-### Production Deployment with Custom Settings
-```yaml
-jobs:
-  deploy-prod:
-    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/build-deploy.yml@main
-    with:
-      service-name: my-service
-      environment: prod
-      registry: 560285300220.dkr.ecr.us-east-1.amazonaws.com/bisnow/my-service
-      path-to-k8s-image-tag: .k8s/prod/kustomization.yaml
-      eks-cluster-stack-name: bisnow-prod-eks
-      cf-template: infrastructure/prod-template.yaml
-      platforms: linux/amd64,linux/arm64
-```
-
-### Multi-Environment Pipeline
-```yaml
-jobs:
-  deploy-dev:
-    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/build-deploy.yml@main
-    with:
-      service-name: my-service
-      environment: dev
-      registry: 560285300220.dkr.ecr.us-east-1.amazonaws.com/bisnow/my-service
-      path-to-k8s-image-tag: .k8s/dev/kustomization.yaml
-      eks-cluster-stack-name: bisnow-non-prod-eks
-
-  deploy-prod:
-    needs: deploy-dev
-    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/build-deploy.yml@main
-    with:
-      service-name: my-service
-      environment: prod
-      registry: 560285300220.dkr.ecr.us-east-1.amazonaws.com/bisnow/my-service
-      path-to-k8s-image-tag: .k8s/prod/kustomization.yaml
-      eks-cluster-stack-name: bisnow-prod-eks
-```
