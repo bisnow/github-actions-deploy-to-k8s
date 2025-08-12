@@ -25,7 +25,7 @@ on:
 
 jobs:
   deploy:
-    uses: your-org/shared-workflows/.github/workflows/build-deploy.yml@main
+    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/build-deploy.yml@main
     with:
       # Required inputs
       service-name: my-service
@@ -117,7 +117,7 @@ permissions:
 ```yaml
 jobs:
   deploy-dev:
-    uses: bisnow/shared-workflows/.github/workflows/build-deploy.yml@main
+    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/build-deploy.yml@main
     with:
       service-name: my-service
       registry: 560285300220.dkr.ecr.us-east-1.amazonaws.com/bisnow/my-service
@@ -129,7 +129,7 @@ jobs:
 ```yaml
 jobs:
   deploy-prod:
-    uses: bisnow/shared-workflows/.github/workflows/build-deploy.yml@main
+    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/build-deploy.yml@main
     with:
       service-name: my-service
       environment: prod
@@ -144,7 +144,7 @@ jobs:
 ```yaml
 jobs:
   deploy-dev:
-    uses: bisnow/shared-workflows/.github/workflows/build-deploy.yml@main
+    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/build-deploy.yml@main
     with:
       service-name: my-service
       environment: dev
@@ -154,7 +154,7 @@ jobs:
 
   deploy-prod:
     needs: deploy-dev
-    uses: bisnow/shared-workflows/.github/workflows/build-deploy.yml@main
+    uses: bisnow/github-actions-deploy-to-k8s/.github/workflows/build-deploy.yml@main
     with:
       service-name: my-service
       environment: prod
