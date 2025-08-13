@@ -200,7 +200,7 @@ jobs:
           fi
       
       - name: Tag Image Using Composite Action
-        uses: ./.github/actions/tag-docker-image
+        uses: bisnow/github-actions-tag-image@main
         with:
           registry: ${{ inputs.registry }}/${{ inputs.service-name }}
           aws-account: ${{ inputs.aws-account }}
