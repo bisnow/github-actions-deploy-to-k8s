@@ -1,5 +1,5 @@
-name: Build and Deploy to Environment
-description: Reusable workflow to build and deploy services to k8s clusters
+name: Deploy to Environment
+description: Reusable workflow to deploy services to k8s clusters
 
 permissions:
   id-token: write
@@ -29,17 +29,17 @@ on:
         required: true
         type: string
         
+      path-to-k8s-image-tag:
+        description: The path to the kustomization.yaml file containing the image tag
+        required: true
+        type: string
+
       cf-template:
         description: The CloudFormation template file path
         required: false
         type: string
         default: aws-resources.yaml
 
-      path-to-k8s-image-tag:
-        description: The path to the kustomization.yaml file containing the image tag
-        required: true
-        type: string
-      
       branch-override:
         description: The branch that will be updated (usually main)
         required: false
@@ -48,7 +48,7 @@ on:
 
       eks-cluster-stack-name:
         description: The name of the EKS cluster stack for CloudFormation
-        required: true
+        required: false
         type: string
 
       aws-account:
@@ -57,23 +57,11 @@ on:
         type: string
         default: bisnow
 
-      platforms:
-        description: Docker platforms to build for
-        required: false
-        type: string
-        default: linux/arm64
-
       flux-target-branch:
         description: The branch that flux watches (usually flux-main)
         required: false
         type: string
         default: flux-main
-
-      exclude-paths:
-        description: Regex pattern for paths to exclude from build change detection
-        required: false
-        type: string
-        default: '^(\.k8s/|k8s/|\.github/)'
 
       source-image-tag:
         description: Source image tag to use for beta/prod environments (e.g., dev-123)
@@ -92,48 +80,14 @@ on:
         required: false
         type: string
         default: ''
+      
+      disable-cloudformation:
+        description: Disable CloudFormation deployment
+        required: false
+        type: boolean
+        default: false
 
 jobs:
-  check-for-build-changes:
-    name: Check for Build-Relevant Changes
-    runs-on: ubuntu-latest
-    outputs:
-      build_container: ${{ steps.filter.outputs.build_container }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - name: Check for relevant changes
-        id: filter
-        run: |
-          # For beta and prod environments, we don't build - we only tag existing images
-          if [[ "${{ inputs.environment }}" == "beta" || "${{ inputs.environment }}" == "prod" ]]; then
-            echo "Environment is ${{ inputs.environment }} - no build needed, will tag existing image"
-            echo "build_container=false" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
-            echo "Manual run: building container"
-            echo "build_container=true" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-          
-          # Build exclude pattern - combine default excludes with CF template
-          EXCLUDE_PATTERN="${{ inputs.exclude-paths }}|${{ inputs.cf-template }}$"
-          
-          CHANGED=$(git diff --name-only ${{ github.event.before }} ${{ github.sha }} | grep -vE "$EXCLUDE_PATTERN" || true)
-          if [[ -n "$CHANGED" ]]; then
-            echo "Changes found that require container build:"
-            echo "$CHANGED"
-            echo "build_container=true" >> $GITHUB_OUTPUT
-          else
-            echo "No changes found that require container build"
-            echo "build_container=false" >> $GITHUB_OUTPUT
-          fi
-
   check-for-k8s-changes:
     name: Check for K8s Manifest Changes
     runs-on: ubuntu-latest
@@ -158,31 +112,10 @@ jobs:
             echo "k8s_changed=false" >> $GITHUB_OUTPUT
           fi
 
-  build-and-push:
-    name: Build and Push Docker Image to ECR
-    runs-on: ubuntu-latest
-    needs: check-for-build-changes
-    if: needs.check-for-build-changes.outputs.build_container == 'true'
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      
-      - name: Build and Push Image to ECR (${{ env.TAG }})
-        uses: bisnow/github-actions-build-and-push-image@v2.1
-        with:
-          aws-account: ${{ inputs.aws-account }}
-          platforms: ${{ inputs.platforms }}
-          registry: ${{ inputs.registry }}
-          build-assets: true
-          image-tag: ${{ env.TAG }}
-
   tag-existing-image:
     name: Tag Existing Image for Beta/Prod
     runs-on: ubuntu-latest
-    needs: check-for-build-changes
-    if: |
-      needs.check-for-build-changes.outputs.build_container == 'false' && 
-      ('${{ inputs.environment }}' == 'beta' || '${{ inputs.environment }}' == 'prod')
+    if: inputs.environment == 'beta' || inputs.environment == 'prod'
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -209,54 +142,10 @@ jobs:
           dst-registry: ${{ inputs.dst-registry }}
           dst-aws-account: ${{ inputs.dst-aws-account }}
 
-  update-image-tag:
-    name: Update Kustomize Image Tag in Manifest
-    runs-on: ubuntu-latest
-    needs: [build-and-push, tag-existing-image]
-    if: |
-      (needs.build-and-push.result == 'success' && needs.build-and-push.result != 'skipped') ||
-      (needs.tag-existing-image.result == 'success' && needs.tag-existing-image.result != 'skipped')
-    steps:
-      - name: Checkout Repository
-        uses: actions/checkout@v4
-      
-      - name: Update manifest image to ${{ env.TAG }}
-        run: |
-          echo "Updating image tag in ${{ inputs.path-to-k8s-image-tag }}"
-          # Verify the file exists
-          if [[ ! -f "${{ inputs.path-to-k8s-image-tag }}" ]]; then
-            echo "Error: Kustomization file not found at ${{ inputs.path-to-k8s-image-tag }}"
-            exit 1
-          fi
-          
-          # Update the image tag in the manifest 
-          sed -i "s|newTag: .*|newTag: ${{ env.TAG }}|" "${{ inputs.path-to-k8s-image-tag }}"
-          
-          # Verify the change was made
-          if ! grep -q "newTag: ${{ env.TAG }}" "${{ inputs.path-to-k8s-image-tag }}"; then
-            echo "Warning: Image tag may not have been updated correctly"
-            cat "${{ inputs.path-to-k8s-image-tag }}"
-          fi
-      
-      - name: Commit and push manifest update for ${{ env.TAG }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add "${{ inputs.path-to-k8s-image-tag }}"
-          
-          # Check if there are changes to commit
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
-          
-          git commit -m "chore(${{ inputs.service-name }}): update ${{ inputs.environment }} image to ${{ env.TAG }}"
-          git pull --rebase origin ${{ inputs.branch-override }}
-          git push
-
   check-for-cf-changes:
     name: Check for CloudFormation/Infra Changes
     runs-on: ubuntu-latest
+    if: !inputs.disable-cloudformation
     outputs:
       cf_changed: ${{ steps.detect.outputs.cf_changed }}
     steps:
@@ -319,26 +208,22 @@ jobs:
   update-flux-branch:
     name: Force-update flux branch to match deployment branch
     runs-on: ubuntu-latest
-    needs: [deploy-cloudformation, check-for-build-changes, check-for-k8s-changes, update-image-tag]
+    needs: [check-for-k8s-changes, tag-existing-image, deploy-cloudformation]
     if: always()
     steps:
       - name: Decide if we should update flux branch
         id: should_run
         run: |
-          echo "build_container=${{ needs.check-for-build-changes.outputs.build_container }}"
           echo "k8s_changed=${{ needs.check-for-k8s-changes.outputs.k8s_changed }}"
-          echo "update_image_tag_result=${{ needs.update-image-tag.result }}"
+          echo "tag_existing_image_result=${{ needs.tag-existing-image.result }}"
           
-          # Update flux if either:
-          # 1. Container was built and image tag was successfully updated
-          # 2. No container build needed but k8s manifests changed
-          # 3. Image was tagged for beta/prod and image tag was successfully updated
+          # Update flux if:
+          # 1. K8s manifests changed
+          # 2. Image was tagged for beta/prod successfully
           if { 
-            [ "${{ needs.check-for-build-changes.outputs.build_container }}" = "true" ] && [ "${{ needs.update-image-tag.result }}" = "success" ]
+            [ "${{ needs.check-for-k8s-changes.outputs.k8s_changed }}" = "true" ]
           } || {
-            [ "${{ needs.check-for-build-changes.outputs.build_container }}" = "false" ] && [ "${{ needs.check-for-k8s-changes.outputs.k8s_changed }}" = "true" ]
-          } || {
-            [ "${{ needs.update-image-tag.result }}" = "success" ]
+            [ "${{ needs.tag-existing-image.result }}" = "success" ]
           }; then
             echo "Flux branch update needed"
             echo "run_flux=true" >> $GITHUB_ENV
