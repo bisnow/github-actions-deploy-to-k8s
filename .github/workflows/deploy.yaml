@@ -145,7 +145,7 @@ jobs:
   check-for-cf-changes:
     name: Check for CloudFormation/Infra Changes
     runs-on: ubuntu-latest
-    if: !inputs.disable-cloudformation
+    if: ${{ !inputs.disable-cloudformation }}
     outputs:
       cf_changed: ${{ steps.detect.outputs.cf_changed }}
     steps:
