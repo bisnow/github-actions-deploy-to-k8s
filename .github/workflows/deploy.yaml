@@ -202,7 +202,7 @@ jobs:
           name: ${{ inputs.service-name }}-${{ inputs.environment }}
           template: ./${{ inputs.cf-template }}
           parameter-overrides: "Environment=${{ inputs.environment }},EksClusterStackName=${{ inputs.eks-cluster-stack-name }}"
-          # tags: '[{"Key": "cdci","Value":"github"}]'
+          tags: '[{"Key": "cdci","Value":"github"}]'
           capabilities: CAPABILITY_NAMED_IAM
           no-fail-on-empty-changeset: "1"
 
